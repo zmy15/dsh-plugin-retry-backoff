@@ -1,0 +1,19 @@
+# dsh-plugin-retry-backoff bundle patch.
+#
+# 本插件的 bundle 层：往 profile 的插件树里插入**一行宿主半边**。
+# 前端半边不在这里挂 —— 它由 package.json 的 `dsh.client` 清单声明，
+# 由 DSH 前端在启动时自动注入（与 wallpaper-engine 同一机制）。
+#
+# 为什么是 `insert` 而不是覆盖既有行：本插件是**追加**能力。
+# 官方 `@deepseek-ai/dsh-llm-retry` 仍按各提供方路由的 retryPolicy 工作；
+# 本插件在它**之前**跑（登记顺序 = waterfall 顺序），用用户自定义的退避
+# 曲线消耗自己的轮次预算，预算耗尽后调 next() 把决定权原样交回下游。
+# 因此这里不需要、也不应该覆盖任何官方行。
+#
+# 顺序说明：`insert` 追加在 patch 应用的层里。宿主半边内部用
+# `ctx.on('agent/request-error', …)` 登记，先登记的先跑，所以本插件先于
+# llm-retry 决策 —— 这正是"延长"的语义（先花我们自己的轮次）。
+
+- insert:
+    - id: retry-backoff
+      name: 'dsh-plugin-retry-backoff'

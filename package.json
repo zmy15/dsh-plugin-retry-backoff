@@ -1,0 +1,75 @@
+{
+  "name": "dsh-plugin-retry-backoff",
+  "version": "1.0.1",
+  "description": "DSH 插件：模型请求遇到 429/限流等可重试失败时，按设置面板里自定义的指数退避延长重试轮次与等待时间，直到请求成功。同时支持网页端与桌面端（宿主半边负责重试，前端半边提供设置界面）。",
+  "type": "module",
+  "engines": {
+    "node": ">=18",
+    "dsh": ">=0.1.5-rc.1"
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client.d.ts",
+      "default": "./lib/client.bundle.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/routes.js",
+    "lib/settings-schema.js",
+    "lib/client.js",
+    "lib/client.bundle.js",
+    "lib/types/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "retry",
+    "backoff",
+    "rate-limit",
+    "429"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node test/run.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-agent": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-session": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-session-projection": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-settings": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.5-rc.1",
+    "@deepseek-ai/schemastery": ">=3.18.2",
+    "react": "^18.2.0",
+    "zod": ">=3.22.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    }
+  },
+  "dependencies": {}
+}

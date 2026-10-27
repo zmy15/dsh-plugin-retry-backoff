@@ -1,0 +1,18 @@
+# 统一换行：仓库内一律 LF，检出时按平台自动转换。
+* text=auto eol=lf
+
+# Windows 批处理需要 CRLF（本仓目前没有，保留声明以防将来加入）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源不做换行转换与文本 diff。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.zip binary
+
+# 生成产物：保留在版本库里（DSH 从仓库直接加载它），但不参与 diff 展开。
+lib/client.bundle.js linguist-generated=true

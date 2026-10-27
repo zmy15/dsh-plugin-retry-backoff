@@ -1,0 +1,21 @@
+# 依赖（测试时用 junction 链到已安装的 DSH profile，不提交）
+node_modules/
+
+# 测试临时产物（脚本会写出来再读的中间文件）
+test/_*
+
+# 日志与本地环境
+*.log
+.env
+.env.local
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 构建缓存
+*.tsbuildinfo
+.cache/
