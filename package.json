@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-retry-backoff",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "DSH 插件：模型请求遇到 429/限流等可重试失败时，按设置面板里自定义的指数退避延长重试轮次与等待时间，直到请求成功。同时支持网页端与桌面端（宿主半边负责重试，前端半边提供设置界面）。",
   "type": "module",
   "engines": {

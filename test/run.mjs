@@ -258,9 +258,25 @@ await test('空失败码集合回落默认（否则插件静默失效）', () =>
   assert.deepEqual(settings.retryableCodes, DEFAULTS.retryableCodes);
 });
 
-await test('基数大于上限时回落一对默认值（跨字段约束）', () => {
+await test('上限低于基数时只把基数跟到上限（不弹回默认的 1 分钟）', () => {
+  // 回归：把「单轮上限」滑到最左（100ms）时，旧实现会把两个值一起重置成默认
+  // （60s），于是滑杆跳到"1 分钟"。现在只做行为等价的归一化：基数跟到上限。
   const settings = sanitizeSettings({ initialDelayMs: 50000, maxDelayMs: 1000 });
-  assert.ok(settings.initialDelayMs <= settings.maxDelayMs);
+  assert.equal(settings.maxDelayMs, 1000, '用户设的上限必须保留');
+  assert.equal(settings.initialDelayMs, 1000, '基数跟到上限');
+
+  const left = sanitizeSettings({ maxDelayMs: 100 });
+  assert.equal(left.maxDelayMs, 100, '滑到最左应保持 100ms');
+  assert.equal(left.initialDelayMs, 100, '基数跟到 100ms');
+  assert.equal(backoffDelay(left, 1, () => 0.5), 100, '第 1 轮按上限等 100ms');
+
+  // 归一化前后每一轮的实际等待完全相同（上限本来就封顶）。
+  const base = sanitizeSettings({ initialDelayMs: 50000, maxDelayMs: 1000 });
+  assert.deepEqual(
+    backoffCurve(base, 5),
+    backoffCurve({ ...base, initialDelayMs: 1000 }, 5),
+    '归一化不得改变退避曲线',
+  );
 });
 
 console.log('\n── 3. 宿主半边：429 被接住并按设置退避 ──');
@@ -587,6 +603,20 @@ await test('PUT 拒绝越界值（回落默认而非夹到边界）', async () =
 
   assert.equal(res.statusCode, 200);
   assert.equal(JSON.parse(body()).settings.maxRounds, DEFAULTS.maxRounds, '越界值应回落默认');
+  await harness.dispose();
+});
+
+await test('PUT 单轮上限拉到最小（100ms）不会被重置回默认', async () => {
+  const { harness, handler } = mountAndGetRoute();
+  const { req, res, body } = makePair({ method: 'PUT', body: { maxDelayMs: 100 } });
+  await handler(req, res);
+
+  assert.equal(res.statusCode, 200);
+  const payload = JSON.parse(body());
+  assert.equal(payload.settings.maxDelayMs, 100, '上限必须保留 100ms');
+  assert.equal(payload.settings.initialDelayMs, 100, '基数跟到上限');
+  assert.equal(payload.curve[0], 100, '首轮等待按 100ms 预览');
+  assert.equal(payload.curve.at(-1), 100, '所有轮都不超过 100ms');
   await harness.dispose();
 });
 
