@@ -40,6 +40,19 @@ DSH 内置只对可重试失败做**有界**重试（默认最多 5 次、退避
 失败码默认集合刻意**不含** `AUTH` / `QUOTA` / `INVALID_REQUEST` / `CONTEXT` ——
 这些重试解决不了，重试只会拿你的额度或时间去撞一堵不会开的墙。需要时可以手动勾上。
 
+### 设置存在哪
+
+设置保存在插件自己的文件里，**不依赖 DSH 的 settings 服务**（0.2.x 已移除插件注册
+命名空间的接口）：
+
+```
+$DSH_HOME/retry-backoff/settings.json     # 缺省 ~/.dsh/retry-backoff/settings.json
+```
+
+- 写入是原子的（同目录 tmp + rename），并发保存会排队；
+- 想手改或备份直接编辑这个 JSON 即可，下一次重试/面板请求就会读到；
+- 可用 `DSH_RETRY_BACKOFF_SETTINGS` 指向别的文件（测试或便携场景）。
+
 ---
 
 ## 它怎么工作（实现要点）
@@ -79,6 +92,7 @@ Agent loop 在模型请求以失败分片终止时，跑一条 `agent/request-er
 | `lib/index.js` | 宿主半边：waterfall 监听器、退避决策、持久事件 |
 | `lib/routes.js` | 宿主半边：设置 HTTP 路由（GET / PUT / reset） |
 | `lib/settings-schema.js` | **设置唯一真源**：默认值、量程、消毒、退避公式（两侧共用） |
+| `lib/settings-store.js` | 设置持久化：插件自有 JSON 文件，原子写 + 写队列串行化 |
 | `lib/client.js` | 前端半边源码：官方 `settings.section` 座位上的设置面板 |
 | `lib/client.bundle.js` | 前端产物（由构建脚本生成，勿手改） |
 | `scripts/build-client.mjs` | 把前端源码包成 DSH 的 `__ModuleLoader__` 形态并内联共享 schema |
@@ -104,9 +118,9 @@ node test/all.mjs               # 跑完整套验证
 
 `test/all.mjs` 依次跑七组：
 
-1. **单元测试**（35 项）—— 退避公式（含封顶、抖动、深轮次不溢出）、设置消毒
+1. **单元测试**（41 项）—— 退避公式（含封顶、抖动、深轮次不溢出）、设置消毒
    （越界回落默认而非夹边界）、每个重试分支（429 接住、轮次递增、预算耗尽交回
-   下游、取消、禁用、提供方 Retry-After 的三种情形）、HTTP 路由（含 400/405/413/503）、
+   下游、取消、禁用、提供方 Retry-After 的三种情形）、HTTP 路由（含 400/405/413/500）、
    **前端产物真实渲染**（递归执行组件，能抓到"导航有、点进去空白"那类渲染期异常）。
 2. **端到端** —— 照抄真实 loop 语义跑"连续失败 4 次后成功"，断言退避按
    `100→200→400→800` 递增、每次先持久后开始、轮次结束预算重置，以及
@@ -129,6 +143,7 @@ dsh-plugin-retry-backoff/
 │   ├── index.js              宿主半边：waterfall 监听、退避决策、持久事件
 │   ├── routes.js             宿主半边：设置 HTTP 路由
 │   ├── settings-schema.js    设置唯一真源（宿主与前端共用）
+│   ├── settings-store.js     设置文件存储（原子写 / 串行化）
 │   ├── client.js             前端半边源码：settings.section 座位上的面板
 │   ├── client.bundle.js      前端产物（生成物，改 client.js 后重跑 build）
 │   └── types/                类型声明
@@ -181,6 +196,24 @@ DSH 启动时会校验插件的 `peerDependencies` 与本机运行时是否兼�
 `node test/verify-client-contract.mjs <包目录>` 会把每个 peer 范围与**实际安装的运行时
 版本**逐个比对，`test/verify-semver.mjs` 则钉死 semver 语义（含 prerelease 序与 caret 上界），
 让这类"装上了却不加载"在安装期就变成红字。
+
+---
+
+## 设置面板按钮点不动？
+
+「保存 / 恢复默认」变灰（disabled）时，面板下方会给出原因。1.0.3 起设置存在插件自己的
+文件里，正常情况下按钮始终可用；只有**宿主写不了那个文件**（目录权限等）才会只读：
+
+- 点面板里的「**重新检测**」重读一次；
+- 仍不行：查看宿主日志里的 `retry-backoff: settings write failed`，确认
+  `$DSH_HOME/retry-backoff` 可写，然后重启 DSH。
+
+> **历史修复**：
+> - 1.0.1 在注册路由时快照了尚未就绪的 settings scope，两个按钮永久禁用；
+> - 1.0.2 改为惰性读取 scope，但 DSH **0.2.x 的 settings 服务已没有 `register()`**
+>   —— 桌面端因此仍永远等不到 scope；
+> - 1.0.3 不再依赖 settings 服务，改为插件自有 JSON 文件（与 wallpaper-engine 同一模式），
+>   网页端 / 桌面端 / 0.1.x / 0.2.x 行为一致。
 
 ---
 

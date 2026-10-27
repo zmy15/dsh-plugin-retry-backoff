@@ -13,10 +13,7 @@ export declare const name: 'retry-backoff';
 /** 必需服务依赖。 */
 export declare const inject: string[];
 
-/** 本插件的设置命名空间。 */
-export declare const SETTINGS_NS: 'retry-backoff';
-
-/** 行内配置 schema（必须为空；全部可调项在用户设置里）。 */
+/** 行内配置 schema（必须为空；全部可调项在插件设置面板里）。 */
 export declare const Config: z<Record<string, never>>;
 
 /** 用户设置值。 */
@@ -41,8 +38,12 @@ export interface RetryBackoffSettings {
   settingsVersion: number;
 }
 
-/** 设置命名空间 schema。 */
-export declare const SettingsSchema: z<RetryBackoffSettings>;
+/**
+ * 设置存储文件路径（`$DSH_HOME/retry-backoff/settings.json`，
+ * 可由 `DSH_RETRY_BACKOFF_SETTINGS` 覆盖）。
+ * @returns 绝对路径。
+ */
+export declare function resolveSettingsPath(): string;
 
 /**
  * 挂载本插件：在 `agent/request-error` waterfall 上按用户设置做有界指数退避重试。

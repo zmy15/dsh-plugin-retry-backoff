@@ -12,6 +12,16 @@
 
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 import {
   DEFAULTS,
@@ -19,8 +29,9 @@ import {
   backoffDelay,
   sanitizeSettings,
 } from '../lib/settings-schema.js';
-import { apply as applyHost, SettingsSchema } from '../lib/index.js';
+import { apply as applyHost } from '../lib/index.js';
 import { registerSettingsRoutes, BASE } from '../lib/routes.js';
+import { createSettingsStore, resolveSettingsPath } from '../lib/settings-store.js';
 
 let passed = 0;
 let failed = 0;
@@ -51,7 +62,19 @@ const tick = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms));
  * 关键点：`ctx.on('agent/request-error', …)` 的登记顺序就是 waterfall 顺序，
  * 桩据此把多个监听器串成一条链 —— 于是"预算耗尽后交回下游"能被真正测到。
  */
-function makeCtx({ settings: initialSettings } = {}) {
+function makeCtx({ settings: initialSettings, home } = {}) {
+  const ownsHome = home === undefined;
+  const testHome = home ?? mkdtempSync(join(tmpdir(), 'dsh-rb-test-'));
+  const settingsPath = join(testHome, 'retry-backoff', 'settings.json');
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  // 首次造 harness 时写入初始设置；复用同一个 home（持久化测试）时不覆盖。
+  if (initialSettings !== undefined || !existsSync(settingsPath)) {
+    writeFileSync(settingsPath, `${JSON.stringify(sanitizeSettings(initialSettings ?? DEFAULTS), null, 2)}\n`, 'utf8');
+  }
+  // `apply` 在挂载时解析路径；用环境变量把它钉到本用例的临时文件，
+  // 绝不碰真实的 ~/.dsh/retry-backoff/settings.json。
+  process.env.DSH_RETRY_BACKOFF_SETTINGS = settingsPath;
+
   const log = [];
   const listeners = new Map();
   const effects = [];
@@ -63,24 +86,6 @@ function makeCtx({ settings: initialSettings } = {}) {
     id: 'test-session',
     append(type, data) {
       events.push({ type, data });
-    },
-  };
-
-  const scopeValue = { current: sanitizeSettings(initialSettings ?? DEFAULTS) };
-  /** 记录写入，便于断言"脏值是否被消毒后才落盘"。 */
-  const writes = [];
-  const scope = {
-    get: () => scopeValue.current,
-    watch: () => () => {},
-    update: async (patch) => {
-      writes.push(patch);
-      scopeValue.current = sanitizeSettings({ ...scopeValue.current, ...patch });
-    },
-    // replace 的语义与真实 SettingsScope 一致：整段替换用户层
-    // （缺键回继承默认值），所以 `replace({})` = 完整重置。
-    replace: async (section) => {
-      writes.push(section);
-      scopeValue.current = sanitizeSettings(section);
     },
   };
 
@@ -100,12 +105,6 @@ function makeCtx({ settings: initialSettings } = {}) {
       error: (...args) => log.push(['error', args]),
     },
     webServer,
-    // `ctx.inject(deps, callback)` 是 cordis 的子插件机制：依赖就绪后才调用 callback。
-    // 桩里同步调用（测试中依赖立刻可用），子插件拿到的是同一个 ctx。
-    inject(_deps, callback) {
-      callback(ctx);
-      return undefined;
-    },
     on(event, handler) {
       if (!listeners.has(event)) listeners.set(event, []);
       listeners.get(event).push(handler);
@@ -118,16 +117,6 @@ function makeCtx({ settings: initialSettings } = {}) {
     effect(fn) {
       effects.push(fn);
       return () => {};
-    },
-    get(name, strict = true) {
-      if (name === 'settings') {
-        // 插件用 `ctx.get('settings', false)`（宽松模式）：无论激活与否都应拿到注册入口。
-        return {
-          register: () => scope,
-          get: () => scopeValue.current,
-        };
-      }
-      return undefined;
     },
     sessionProjections: {
       register(definition) {
@@ -167,11 +156,17 @@ function makeCtx({ settings: initialSettings } = {}) {
       const cleaner = effect();
       if (typeof cleaner === 'function') await cleaner();
     }
+    if (ownsHome) rmSync(testHome, { recursive: true, force: true });
   }
 
   return {
-    ctx, session, events, log, scopeValue, scope, routes, webServer, writes,
-    runWaterfall, dispose, setSettings: (s) => { scopeValue.current = sanitizeSettings(s); },
+    ctx, session, events, log, routes, webServer,
+    runWaterfall, dispose,
+    settingsPath,
+    testHome,
+    /** 直接改盘（模拟用户手改设置文件），下一次读取即生效。 */
+    setSettings: (s) => writeFileSync(settingsPath, `${JSON.stringify(sanitizeSettings(s), null, 2)}\n`, 'utf8'),
+    readSettingsFile: () => JSON.parse(readFileSync(settingsPath, 'utf8')),
   };
 }
 
@@ -623,37 +618,147 @@ await test('POST /reset 让设置回默认', async () => {
   await harness.dispose();
 });
 
-await test('没有 settings 服务时 GET 仍可读、PUT 返回 503（不崩）', async () => {
-  // 直接测路由模块的只读分支：scope=null 表示不可持久化。
+await test('没有 settings 服务也报告可写（设置存在插件自己的文件里）', async () => {
+  // 回归：DSH 0.2.x 的 settings 服务没有 register()。旧实现会永远只读，
+  // 面板两个按钮永久 disabled（用户看到"点了没反应"）。
   const harness = makeCtx();
-  const server = makeStubWebServer();
-  registerSettingsRoutes(harness.ctx, server, {
-    scope: null,
-    readSettings: () => sanitizeSettings(DEFAULTS),
-  });
-  const handler = server.routes.get(`exact:${BASE}/settings`);
+  applyHost(harness.ctx, {});
+  const handler = harness.routes.get(`exact:${BASE}/settings`);
 
   const get = makePair({ method: 'GET' });
   await handler(get.req, get.res);
-  assert.equal(get.res.statusCode, 200, '只读模式应仍能读');
-  assert.equal(JSON.parse(get.body()).runtime.writable, false);
+  const payload = JSON.parse(get.body());
+  assert.equal(get.res.statusCode, 200);
+  assert.equal(payload.runtime.writable, true, '文件存储必须报告可写');
+  assert.equal(payload.runtime.storage, 'file');
+  assert.equal(payload.runtime.path, harness.settingsPath);
 
-  const put = makePair({ method: 'PUT', body: { maxRounds: 3 } });
-  await handler(put.req, put.res);
-  assert.equal(put.res.statusCode, 503, '不可持久化时应拒绝写入');
+  await harness.dispose();
 });
 
-/** 只读分支用的最小 webServer 桩。 */
-function makeStubWebServer() {
-  const routes = new Map();
-  return {
-    routes,
-    register({ kind, path, handler }) {
-      routes.set(`${kind}:${path}`, handler);
-      return () => routes.delete(`${kind}:${path}`);
+await test('PUT 原子落盘，重挂载后仍是保存值', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-rb-persist-'));
+  const harness = makeCtx({ home });
+  applyHost(harness.ctx, {});
+  const handler = harness.routes.get(`exact:${BASE}/settings`);
+
+  const put = makePair({
+    method: 'PUT',
+    body: { maxRounds: 7, initialDelayMs: 2500, multiplier: 3, maxDelayMs: 30000, jitterRatio: 0 },
+  });
+  await handler(put.req, put.res);
+  assert.equal(put.res.statusCode, 200);
+
+  // 磁盘上真的写了（且是消毒后的完整快照）。
+  const onDisk = harness.readSettingsFile();
+  assert.equal(onDisk.maxRounds, 7);
+  assert.equal(onDisk.initialDelayMs, 2500);
+  assert.ok(onDisk.settingsVersion >= 1);
+  assert.equal(existsSync(`${harness.settingsPath}.tmp`), false, '不应留下 tmp 文件');
+
+  // 同一个 home 重新挂载（模拟 DSH 重启）⇒ 设置从文件读回。
+  await harness.dispose();
+  const second = makeCtx({ home });
+  applyHost(second.ctx, {});
+  const get = makePair({ method: 'GET' });
+  await second.routes.get(`exact:${BASE}/settings`)(get.req, get.res);
+  assert.equal(JSON.parse(get.body()).settings.maxRounds, 7, '重启后设置必须还在');
+  await second.dispose();
+  rmSync(home, { recursive: true, force: true });
+});
+
+await test('POST /reset 删除设置文件并回默认', async () => {
+  const { harness, reset } = mountAndGetRoute({ maxRounds: 99 });
+  assert.equal(harness.readSettingsFile().maxRounds, 99, '前置：文件里应是自定义值');
+
+  const { req, res, body } = makePair({ method: 'POST' });
+  await reset(req, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(body()).settings.maxRounds, DEFAULTS.maxRounds, '重置后应回默认');
+  assert.equal(existsSync(harness.settingsPath), false, 'reset 应删掉用户设置文件');
+  await harness.dispose();
+});
+
+await test('设置文件损坏时回落默认值（不崩、不把坏值带进决策）', async () => {
+  const { harness, handler } = mountAndGetRoute();
+  writeFileSync(harness.settingsPath, '{ this is not json', 'utf8');
+
+  const get = makePair({ method: 'GET' });
+  await handler(get.req, get.res);
+  assert.equal(get.res.statusCode, 200);
+  assert.equal(JSON.parse(get.body()).settings.maxRounds, DEFAULTS.maxRounds);
+  assert.ok(harness.log.some(([level]) => level === 'warn'), '坏文件应告警一次');
+  await harness.dispose();
+});
+
+await test('写盘失败 ⇒ 500（存储问题不是请求非法）', async () => {
+  const harness = makeCtx();
+  applyHost(harness.ctx, {});
+  const handler = harness.routes.get(`exact:${BASE}/settings`);
+  // 直接测路由的错误分支：写依赖抛错时应 500，而不是 400/崩溃。
+  const server = {
+    routes: new Map(),
+    register({ kind, path, handler: h }) {
+      server.routes.set(`${kind}:${path}`, h);
+      return () => {};
     },
   };
-}
+  registerSettingsRoutes(harness.ctx, server, {
+    readSettings: () => sanitizeSettings(DEFAULTS),
+    writeSettings: async () => { throw new Error('disk full'); },
+    resetSettings: async () => { throw new Error('disk full'); },
+    settingsPath: '/nonexistent/settings.json',
+  });
+  const failHandler = server.routes.get(`exact:${BASE}/settings`);
+  const failReset = server.routes.get(`exact:${BASE}/reset`);
+
+  const put = makePair({ method: 'PUT', body: { maxRounds: 3 } });
+  await failHandler(put.req, put.res);
+  assert.equal(put.res.statusCode, 500, '写盘失败应 500');
+
+  const post = makePair({ method: 'POST' });
+  await failReset(post.req, post.res);
+  assert.equal(post.res.statusCode, 500, '重置失败也应 500');
+  await harness.dispose();
+});
+
+
+await test('设置存储只写消毒后的值，且并发保存按顺序完成', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-rb-store-'));
+  const filePath = join(home, 'settings.json');
+  const store = createSettingsStore({ filePath });
+
+  // 越界值先消毒再落盘：磁盘上不能出现 99999。
+  await store.save({ maxRounds: 99999, initialDelayMs: -1 });
+  assert.equal(store.get().maxRounds, DEFAULTS.maxRounds);
+  assert.equal(JSON.parse(readFileSync(filePath, 'utf8')).maxRounds, DEFAULTS.maxRounds);
+
+  // 并发写：最后一个请求的结果应成为最终值（不被旧快照吞掉）。
+  await Promise.all([
+    store.save({ maxRounds: 3 }),
+    store.save({ maxRounds: 4 }),
+    store.save({ maxRounds: 5 }),
+  ]);
+  assert.equal(store.get().maxRounds, 5, '串行化后应是最后一次写入');
+  assert.equal(existsSync(`${filePath}.tmp`), false);
+
+  await store.reset();
+  assert.equal(store.get().maxRounds, DEFAULTS.maxRounds);
+  assert.equal(existsSync(filePath), false);
+  rmSync(home, { recursive: true, force: true });
+});
+
+await test('DSH_RETRY_BACKOFF_SETTINGS 覆盖设置文件路径', () => {
+  const previous = process.env.DSH_RETRY_BACKOFF_SETTINGS;
+  process.env.DSH_RETRY_BACKOFF_SETTINGS = 'C:\\tmp\\rb-settings.json';
+  try {
+    assert.equal(resolveSettingsPath(), 'C:\\tmp\\rb-settings.json');
+  } finally {
+    if (previous === undefined) delete process.env.DSH_RETRY_BACKOFF_SETTINGS;
+    else process.env.DSH_RETRY_BACKOFF_SETTINGS = previous;
+  }
+});
 
 
 if (failed > 0) process.exit(1);

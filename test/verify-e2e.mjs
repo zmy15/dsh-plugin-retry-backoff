@@ -12,6 +12,9 @@
  * 用法：node test/verify-e2e.mjs
  */
 
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { apply as applyHost } from '../lib/index.js';
 import { sanitizeSettings } from '../lib/settings-schema.js';
 
@@ -42,27 +45,17 @@ function makeSession() {
  * 造一个尽量贴近真实的上下文：
  *  · `on` 收集 waterfall 监听器（登记顺序 = 链顺序）；
  *  · `sessionProjections` 从会话事件重放（与真实投影同一语义）；
- *  · `settings` 提供一个可写的 scope（模拟真实 SettingsScope）。
+ *  · 设置走插件自有文件（与生产同一条 store 路径，仅换到临时目录）。
  */
 function makeCtx(initial, session) {
   const listeners = [];
   const effects = [];
   const projections = new Map();
-  const current = { value: sanitizeSettings(initial) };
-  const writes = [];
-
-  const scope = {
-    get: () => current.value,
-    watch: () => () => {},
-    update: async (patch) => {
-      writes.push(patch);
-      current.value = sanitizeSettings({ ...current.value, ...patch });
-    },
-    replace: async (section) => {
-      writes.push(section);
-      current.value = sanitizeSettings(section);
-    },
-  };
+  const home = mkdtempSync(join(tmpdir(), 'dsh-rb-e2e-'));
+  const settingsPath = join(home, 'retry-backoff', 'settings.json');
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(sanitizeSettings(initial), null, 2), 'utf8');
+  process.env.DSH_RETRY_BACKOFF_SETTINGS = settingsPath;
 
   const ctx = {
     logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -79,9 +72,6 @@ function makeCtx(initial, session) {
       };
     },
     effect(fn) { effects.push(fn); },
-    get(name, strict = true) { return name === 'settings' ? { register: () => scope, get: () => current.value } : undefined; },
-    // 设置命名空间通过 ctx.inject(['settings'], …) 挂载（等依赖就绪后回调）。
-    inject(_deps, callback) { callback(ctx); return undefined; },
     sessionProjections: {
       register(def) { projections.set(def.key, def); return () => projections.delete(def.key); },
       stateOf(_s, key) {
@@ -94,7 +84,14 @@ function makeCtx(initial, session) {
     },
   };
 
-  return { ctx, scope, current, writes, listeners };
+  return {
+    ctx,
+    listeners,
+    settingsPath,
+    getSettings: () => JSON.parse(readFileSync(settingsPath, 'utf8')),
+    setSettings: (s) => writeFileSync(settingsPath, JSON.stringify(sanitizeSettings(s), null, 2), 'utf8'),
+    cleanup: () => rmSync(home, { recursive: true, force: true }),
+  };
 }
 
 /**
@@ -196,6 +193,7 @@ async function runChain(chain, payload) {
     `实际：${JSON.stringify(afterTurnEnd)}`);
 
   await Promise.all(effectsCleanup(harness.ctx));
+  harness.cleanup();
 }
 
 // ── 场景：预算耗尽后交回下游（官方策略接管）────────────────────────────────
@@ -230,6 +228,7 @@ async function runChain(chain, payload) {
     session.events.filter((e) => e.type === 'llm/retry-backoff').length === 2);
 
   await Promise.all(effectsCleanup(harness.ctx));
+  harness.cleanup();
 }
 
 // ── 场景：用户在运行中改设置，下一次失败立即生效 ────────────────────────────
@@ -249,8 +248,8 @@ async function runChain(chain, payload) {
   const firstDelay = session.events.find((e) => e.type === 'llm/retry-backoff').data.delayMs;
   check('改设置前用旧值', firstDelay === 500, `实际 ${firstDelay}`);
 
-  // 用户在面板里保存了新设置（走 scope.replace，与 HTTP 路由同一条写路径）。
-  await harness.scope.replace({ ...harness.current.value, maxRounds: 5, initialDelayMs: 1200 });
+  // 用户在面板里保存了新设置（走同一份设置文件）。
+  harness.setSettings({ ...harness.getSettings(), maxRounds: 5, initialDelayMs: 1200 });
 
   // 新的一步 ⇒ 预算重置 ⇒ 下一次失败应按新设置退避。
   session.append('step/start', { turn: 1, step: 2 });
@@ -267,6 +266,7 @@ async function runChain(chain, payload) {
     `实际 ${all[1].data.maxRounds}`);
 
   await Promise.all(effectsCleanup(harness.ctx));
+  harness.cleanup();
 }
 
 /** 触发并收集 ctx.effect 的清理器（本文件的 ctx 桩未收集，保留占位以便统一调用）。 */

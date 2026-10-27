@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-retry-backoff",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "DSH 插件：模型请求遇到 429/限流等可重试失败时，按设置面板里自定义的指数退避延长重试轮次与等待时间，直到请求成功。同时支持网页端与桌面端（宿主半边负责重试，前端半边提供设置界面）。",
   "type": "module",
   "engines": {
@@ -25,6 +25,7 @@
     "lib/index.js",
     "lib/routes.js",
     "lib/settings-schema.js",
+    "lib/settings-store.js",
     "lib/client.js",
     "lib/client.bundle.js",
     "lib/types/",
@@ -60,16 +61,10 @@
     "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1",
     "@deepseek-ai/dsh-session": ">=0.1.5-rc.1",
     "@deepseek-ai/dsh-session-projection": ">=0.1.5-rc.1",
-    "@deepseek-ai/dsh-settings": ">=0.1.5-rc.1",
     "@deepseek-ai/dsh-host-webserver": ">=0.1.5-rc.1",
     "@deepseek-ai/schemastery": ">=3.18.2",
     "react": "^18.2.0",
     "zod": ">=3.22.0"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-settings": {
-      "optional": true
-    }
   },
   "dependencies": {}
 }
